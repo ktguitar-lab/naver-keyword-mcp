@@ -1,6 +1,6 @@
 """
 네이버 키워드 MCP 서버
-Claude에서 연관 키워드를 조회할 수 있는 MCP 서버
+Claude에서 연관 키워드를 조회할 수 있는 MCP 서버 (SSE 방식)
 """
 
 import os
@@ -9,6 +9,7 @@ import hmac
 import hashlib
 import base64
 import json
+import asyncio
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -24,7 +25,6 @@ SECRET_KEY = os.getenv("NAVER_SECRET_KEY", "")
 BASE_URL = "https://api.naver.com"
 
 def generate_signature(timestamp, method, path):
-    """HMAC-SHA256 서명 생성"""
     message = f"{timestamp}.{method}.{path}"
     signature = hmac.new(
         SECRET_KEY.encode('utf-8'),
@@ -34,7 +34,6 @@ def generate_signature(timestamp, method, path):
     return base64.b64encode(signature).decode('utf-8')
 
 def get_related_keywords(keyword: str):
-    """네이버 API에서 연관 키워드 조회"""
     timestamp = str(int(time.time() * 1000))
     path = "/keywordstool"
     method = "GET"
@@ -65,7 +64,6 @@ def get_related_keywords(keyword: str):
         return {"error": f"API 오류: {response.status_code}", "detail": response.text}
 
 def format_keywords(data: dict, keyword: str, top_n: int = 15):
-    """키워드 결과를 읽기 좋게 포맷"""
     if "error" in data:
         return data
     
@@ -74,7 +72,6 @@ def format_keywords(data: dict, keyword: str, top_n: int = 15):
     
     keywords = data["keywordList"]
     
-    # 검색량 기준 정렬
     keywords_sorted = sorted(
         keywords,
         key=lambda x: (int(x.get("monthlyPcQcCnt", 0)) if str(x.get("monthlyPcQcCnt", 0)).isdigit() else 0) +
@@ -103,7 +100,6 @@ def format_keywords(data: dict, keyword: str, top_n: int = 15):
         "topKeywords": result
     }
 
-# MCP 프로토콜 구현
 TOOLS = [
     {
         "name": "get_naver_keywords",
@@ -134,14 +130,22 @@ async def root():
 async def health():
     return {"status": "healthy"}
 
+@app.get("/api/keywords/{keyword}")
+async def api_keywords(keyword: str, top_n: int = 15):
+    raw_data = get_related_keywords(keyword)
+    return format_keywords(raw_data, keyword, top_n)
+
+def create_sse_message(data: dict) -> str:
+    return f"data: {json.dumps(data)}\n\n"
+
 @app.get("/mcp")
-async def mcp_sse(request: Request):
-    """MCP SSE 엔드포인트"""
+async def mcp_sse_get(request: Request):
     async def event_generator():
-        # 초기 연결 메시지
-        yield f"data: {json.dumps({'jsonrpc': '2.0', 'method': 'initialized'})}\n\n"
+        yield create_sse_message({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        })
         
-        # 연결 유지
         while True:
             if await request.is_disconnected():
                 break
@@ -154,13 +158,17 @@ async def mcp_sse(request: Request):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
         }
     )
 
 @app.post("/mcp")
 async def mcp_post(request: Request):
-    """MCP JSON-RPC 엔드포인트"""
-    body = await request.json()
+    try:
+        body = await request.json()
+    except:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    
     method = body.get("method", "")
     params = body.get("params", {})
     request_id = body.get("id")
@@ -207,7 +215,6 @@ async def mcp_post(request: Request):
                     }
                 })
             
-            # API 호출
             raw_data = get_related_keywords(keyword)
             formatted = format_keywords(raw_data, keyword, top_n)
             
@@ -240,14 +247,6 @@ async def mcp_post(request: Request):
         "error": {"code": -32601, "message": "Method not found"}
     })
 
-# 간단한 REST API도 제공 (테스트용)
-@app.get("/api/keywords/{keyword}")
-async def api_keywords(keyword: str, top_n: int = 15):
-    """REST API 엔드포인트 (테스트용)"""
-    raw_data = get_related_keywords(keyword)
-    return format_keywords(raw_data, keyword, top_n)
-
 if __name__ == "__main__":
-    import asyncio
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
