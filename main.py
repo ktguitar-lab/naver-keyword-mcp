@@ -1,6 +1,7 @@
 """
 네이버 키워드 MCP 서버
 Claude에서 연관 키워드를 조회할 수 있는 MCP 서버 (SSE 방식)
+v1.1.0 - 파워링크 노출 수 추가
 """
 
 import os
@@ -63,6 +64,22 @@ def get_related_keywords(keyword: str):
     else:
         return {"error": f"API 오류: {response.status_code}", "detail": response.text}
 
+def get_grade(monthly_searches: int, competition: str, powerlink: float) -> str:
+    """블루오션 등급 계산"""
+    if competition == "낮음":
+        if monthly_searches >= 3000:
+            return "🔵 블루오션"
+        elif monthly_searches >= 1000:
+            return "🔵 블루오션"
+    elif competition == "중간":
+        if monthly_searches >= 3000:
+            return "🟡 유망"
+    
+    if monthly_searches >= 1000:
+        return "⚪ 레드오션"
+    
+    return "-"
+
 def format_keywords(data: dict, keyword: str, top_n: int = 15):
     if "error" in data:
         return data
@@ -86,12 +103,24 @@ def format_keywords(data: dict, keyword: str, top_n: int = 15):
         pc_val = 0 if str(pc) == "< 10" else int(pc) if str(pc).isdigit() else 0
         mobile_val = 0 if str(mobile) == "< 10" else int(mobile) if str(mobile).isdigit() else 0
         
+        monthly_searches = pc_val + mobile_val
+        competition = kw.get("compIdx", "")
+        
+        # 파워링크 평균 노출 광고 수
+        pl_avg = kw.get("plAvgDepth", 0)
+        pl_val = 0 if pl_avg == "" or pl_avg is None else float(pl_avg) if str(pl_avg).replace('.','').isdigit() else 0
+        
+        # 등급 계산
+        grade = get_grade(monthly_searches, competition, pl_val)
+        
         result.append({
             "keyword": kw.get("relKeyword", ""),
-            "monthlySearches": pc_val + mobile_val,
+            "monthlySearches": monthly_searches,
             "pcSearches": pc_val,
             "mobileSearches": mobile_val,
-            "competition": kw.get("compIdx", "")
+            "competition": competition,
+            "powerlink": pl_val,
+            "grade": grade
         })
     
     return {
@@ -103,7 +132,7 @@ def format_keywords(data: dict, keyword: str, top_n: int = 15):
 TOOLS = [
     {
         "name": "get_naver_keywords",
-        "description": "네이버 검색광고 API를 사용하여 키워드의 연관 키워드와 월간 검색량을 조회합니다. 블로그 제목 최적화, SEO 키워드 분석에 활용할 수 있습니다.",
+        "description": "네이버 검색광고 API를 사용하여 키워드의 연관 키워드와 월간 검색량을 조회합니다. 블로그 제목 최적화, SEO 키워드 분석에 활용할 수 있습니다. 파워링크 노출 수와 블루오션 등급도 함께 제공합니다.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -124,7 +153,7 @@ TOOLS = [
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "Naver Keyword MCP Server"}
+    return {"status": "ok", "service": "Naver Keyword MCP Server", "version": "1.1.0"}
 
 @app.get("/health")
 async def health():
@@ -184,7 +213,7 @@ async def mcp_post(request: Request):
                 },
                 "serverInfo": {
                     "name": "naver-keyword-mcp",
-                    "version": "1.0.0"
+                    "version": "1.1.0"
                 }
             }
         })
@@ -225,11 +254,12 @@ async def mcp_post(request: Request):
                     f"🔍 '{formatted['searchKeyword']}' 연관 키워드 분석 결과",
                     f"총 {formatted['totalResults']}개 키워드 중 상위 {len(formatted['topKeywords'])}개",
                     "",
-                    "순위 | 키워드 | 월간검색량 | 경쟁강도",
-                    "---|---|---|---"
+                    "순위 | 키워드 | 월간검색량 | 경쟁강도 | 파워링크 | 등급",
+                    "---|---|---|---|---|---"
                 ]
                 for i, kw in enumerate(formatted['topKeywords'], 1):
-                    lines.append(f"{i} | {kw['keyword']} | {kw['monthlySearches']:,} | {kw['competition']}")
+                    pl_display = f"{kw['powerlink']:.1f}개" if kw['powerlink'] > 0 else "없음"
+                    lines.append(f"{i} | {kw['keyword']} | {kw['monthlySearches']:,} | {kw['competition']} | {pl_display} | {kw['grade']}")
                 
                 result_text = "\n".join(lines)
             
